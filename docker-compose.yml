@@ -1,0 +1,51 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:15
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    env_file:
+      - .env
+    ports:
+      - "5432:5432"
+
+  web:
+    build: .
+    command: bash -c "
+      python manage.py migrate &&
+      python manage.py collectstatic --noinput &&
+      gunicorn activeBot.wsgi:application --bind 0.0.0.0:8010"
+    volumes:
+      - .:/app
+      - static_volume:/app/staticfiles
+      - route_steps_volume:/app/route_steps    # ✅ добавлено
+    ports:
+      - "8010:8010"
+    depends_on:
+      - db
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=activeBot.settings
+
+  bot:
+    build:
+      context: .
+    command: python bot/main.py
+    depends_on:
+      - web
+    env_file:
+      - .env
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - DJANGO_SETTINGS_MODULE=activeBot.settings
+      - PYTHONPATH=/app
+    volumes:
+      - .:/app
+      - route_steps_volume:/app/route_steps    # ✅ добавлено
+
+volumes:
+  postgres_data:
+  static_volume:
+  route_steps_volume:                         # ✅ объявлен новый volume
