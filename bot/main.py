@@ -12,13 +12,13 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'activeBot.settings')
 django.setup()
 from PIL import Image, ImageDraw
 from navigation.models import Route, Step, Building
-from navigation.utils import parse_building_from_code
+from navigation.utils import parse_building_from_code, normalize  # Added import for normalize
 from django.conf import settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
+# Updated keys to normalized (Latin) forms
 BUILDING_MARKS = {
     "Т": (293, 732),
     "МТ": (396, 932),
@@ -38,7 +38,39 @@ BUILDING_MARKS = {
     "Ю": (459, 908),
     "Х": (366, 750),
     "КК": (785, 447),
+    "К": (276, 888),
 }
+
+
+def extract_floor(room_code: str) -> int | None:
+    """
+    Определяет этаж по номеру аудитории.
+    """
+    # Normalize input first
+    code = normalize(room_code.strip().upper())
+
+    # какой корпус нашли (префикс или суффикс)
+    token = parse_building_from_code(code)
+
+    core = code
+    if token and token != "DEFAULT":
+        if core.startswith(token):
+            core = core[len(token):]
+        elif core.endswith(token):
+            core = core[:-len(token)]
+
+    # оставляем только цифры из ядра
+    digits = ''.join(ch for ch in core if ch.isdigit())
+    if not digits:
+        return None
+
+    if len(digits) >= 4:
+        return int(digits[:2])
+    elif len(digits) >= 3:
+        return int(digits[0])
+    return None
+
+
 
 def mark_building_on_scheme(building_code: str) -> str:
     """Создаёт копию схемы с отметкой на корпусе и возвращает путь к временному файлу"""
@@ -61,11 +93,24 @@ def mark_building_on_scheme(building_code: str) -> str:
 
 @sync_to_async
 def get_route_by_room_code(code: str):
-    return Route.objects.select_related('building').prefetch_related('steps').filter(room_code__iexact=code).first()
+    # Normalize input and compare normalized versions without changing DB
+    normalized_code = normalize(code.upper())
+    # Fetch all since we can't filter on normalized; assume not too many records
+    routes = Route.objects.select_related('building').prefetch_related('steps').all()
+    for route in routes:
+        if normalize(route.room_code.upper()) == normalized_code:
+            return route
+    return None
 
 @sync_to_async
 def get_building_by_code(code: str):
-    return Building.objects.filter(code=code).first()
+    # Normalize input and compare normalized versions without changing DB
+    normalized_code = normalize(code.upper())
+    buildings = Building.objects.all()
+    for building in buildings:
+        if normalize(building.code.upper()) == normalized_code:
+            return building
+    return None
 
 # =========================
 # Команды
@@ -106,21 +151,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(step.description)
 
     else:
-        # Попробуем угадать корпус
         code = parse_building_from_code(text)
         building = await get_building_by_code(code)
 
+        floor = extract_floor(text)
+
         if building:
-            await update.message.reply_text(
-                f"Маршрут не найден, но аудитория, вероятно, находится в корпусе: {building.name}"
-            )
+            msg = f"Маршрут не найден, но аудитория, вероятно, находится в корпусе: {building.name}"
+            if floor:
+                msg += f"\nЭтаж: {floor}"
+            await update.message.reply_text(msg)
+
             marked_scheme_path = mark_building_on_scheme(building.code)
             with open(marked_scheme_path, 'rb') as image_file:
                 await update.message.reply_photo(photo=image_file, caption=f"Отмечен корпус {building.code}")
         else:
-            await update.message.reply_text(
-                "Маршрут не найден. Возможно, аудитория находится в Главном корпусе (север/центр)."
-            )
+            msg = "Маршрут не найден. Возможно, аудитория находится в Главном корпусе в северном крыле."
+            if floor:
+                msg += f"\nЭтаж: {floor}"
+            await update.message.reply_text(msg)
 
 
 async def how_to_navigate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,7 +197,7 @@ async def how_to_navigate(update: Update, context: ContextTypes.DEFAULT_TYPE):
          "Л — Учебно-лабораторный\n"
          "Ю — Южное крыло\n"
          "Х — Хим. лаборатория\n\n"
-         "_Если буквы нет — Северное/Центральное крыло_")
+         "_Если буквы нет — Главный корпус северное крыло_")
     ]
 
     for image_path, text in steps:
